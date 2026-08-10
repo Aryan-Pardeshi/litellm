@@ -19,6 +19,22 @@ from litellm.llms.vertex_ai.context_caching.vertex_ai_context_caching import (
 )
 
 
+@pytest.fixture(autouse=True)
+def flush_cache_discovery_memo():
+    """The discovery memo is process-wide by design, so it outlives a single test.
+
+    Tests here share one fake discovery URL and reuse cache keys across cases, which
+    would otherwise let one test's stored name answer another test's lookup.
+    """
+    from litellm.llms.vertex_ai.context_caching.vertex_ai_context_caching import (
+        discovered_cache_names,
+    )
+
+    discovered_cache_names.flush_cache()
+    yield
+    discovered_cache_names.flush_cache()
+
+
 class TestContextCachingEndpoints:
     """Test class for ContextCachingEndpoints methods"""
 
@@ -2122,3 +2138,106 @@ class TestContextCachingMultiRegionUrls:
 
         assert url.startswith("https://aiplatform.googleapis.com/")
         assert "/locations/global/cachedContents" in url
+
+
+class TestCacheDiscoveryMemoization:
+    """A resolved cachedContents name must not be re-discovered on every request.
+
+    Discovery is a full paginated LIST against the cachedContents API, issued
+    before generateContent, so leaving it unmemoized puts a network round trip
+    in front of every cache hit.
+    """
+
+    def setup_method(self):
+        from litellm.llms.vertex_ai.context_caching.vertex_ai_context_caching import (
+            discovered_cache_names,
+        )
+
+        discovered_cache_names.flush_cache()
+        self.context_caching = ContextCachingEndpoints()
+        self.mock_logging = MagicMock(spec=Logging)
+        self.mock_client = MagicMock(spec=HTTPHandler)
+        self.mock_async_client = MagicMock(spec=AsyncHTTPHandler)
+
+    def _response(self, display_name="wanted_key", name="cachedContents/123"):
+        response = MagicMock()
+        response.json.return_value = {
+            "cachedContents": [{"name": name, "displayName": display_name}]
+        }
+        return response
+
+    def _call(self, cache_key="wanted_key", vertex_location="us-central1"):
+        return self.context_caching.check_cache(
+            cache_key=cache_key,
+            client=self.mock_client,
+            headers={"Authorization": "Bearer token"},
+            api_key="test_key",
+            api_base=None,
+            logging_obj=self.mock_logging,
+            custom_llm_provider="vertex_ai",
+            vertex_project="test_project",
+            vertex_location=vertex_location,
+            vertex_auth_header="Bearer test-token",
+        )
+
+    @patch.object(ContextCachingEndpoints, "_get_token_and_url_context_caching")
+    def test_repeat_lookup_of_a_known_cache_skips_discovery(self, mock_get_token_url):
+        mock_get_token_url.return_value = ("token", "https://test-url.com")
+        self.mock_client.get.return_value = self._response()
+
+        assert self._call() == "cachedContents/123"
+        assert self._call() == "cachedContents/123"
+
+        assert self.mock_client.get.call_count == 1
+
+    @patch.object(ContextCachingEndpoints, "_get_token_and_url_context_caching")
+    def test_a_miss_is_not_memoized(self, mock_get_token_url):
+        """Nothing was found, so the next request must look again: the cache may
+        have been created in between."""
+        mock_get_token_url.return_value = ("token", "https://test-url.com")
+        self.mock_client.get.return_value = self._response(display_name="something_else")
+
+        assert self._call() is None
+        assert self._call() is None
+
+        assert self.mock_client.get.call_count == 2
+
+    @patch.object(ContextCachingEndpoints, "_get_token_and_url_context_caching")
+    def test_memoization_is_scoped_to_the_discovery_url(self, mock_get_token_url):
+        """Same cache_key against a different project or location is a different
+        cache, so it must not be served from the first one's entry."""
+        mock_get_token_url.side_effect = [
+            ("token", "https://us-central1-url.com"),
+            ("token", "https://europe-west4-url.com"),
+        ]
+        self.mock_client.get.return_value = self._response()
+
+        self._call(vertex_location="us-central1")
+        self._call(vertex_location="europe-west4")
+
+        assert self.mock_client.get.call_count == 2
+
+    @pytest.mark.asyncio
+    @patch.object(ContextCachingEndpoints, "_get_token_and_url_context_caching")
+    async def test_async_repeat_lookup_skips_discovery(self, mock_get_token_url):
+        mock_get_token_url.return_value = ("token", "https://test-url.com")
+        self.mock_async_client.get = AsyncMock(return_value=self._response())
+
+        async def call():
+            return await self.context_caching.async_check_cache(
+                cache_key="wanted_key",
+                client=self.mock_async_client,
+                headers={"Authorization": "Bearer token"},
+                api_key="test_key",
+                api_base=None,
+                logging_obj=self.mock_logging,
+                custom_llm_provider="vertex_ai",
+                vertex_project="test_project",
+                vertex_location="us-central1",
+                vertex_auth_header="Bearer test-token",
+            )
+
+        assert await call() == "cachedContents/123"
+        assert await call() == "cachedContents/123"
+
+        assert self.mock_async_client.get.call_count == 1

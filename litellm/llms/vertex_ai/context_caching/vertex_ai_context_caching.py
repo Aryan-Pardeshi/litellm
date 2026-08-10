@@ -5,7 +5,12 @@ import httpx
 import litellm
 from litellm._logging import verbose_logger
 from litellm.caching.caching import Cache, LiteLLMCacheType
-from litellm.constants import MINIMUM_PROMPT_CACHE_TOKEN_COUNT
+from litellm.caching.in_memory_cache import InMemoryCache
+from litellm.constants import (
+    MINIMUM_PROMPT_CACHE_TOKEN_COUNT,
+    VERTEX_CACHE_DISCOVERY_MEMO_MAX_ENTRIES,
+    VERTEX_CACHE_DISCOVERY_MEMO_TTL_SECONDS,
+)
 from litellm.litellm_core_utils.litellm_logging import Logging
 from litellm.llms.custom_httpx.http_handler import (
     AsyncHTTPHandler,
@@ -30,6 +35,19 @@ from .transformation import (
 local_cache_obj: Final = Cache(type=LiteLLMCacheType.LOCAL)  # only used for calling 'get_cache_key' function
 
 MAX_PAGINATION_PAGES: Final = 100  # Reasonable upper bound for pagination
+
+# Discovery is a full paginated LIST of cachedContents issued before generateContent, so an
+# unmemoized lookup puts a network round trip in front of every cache hit. Keyed by discovery
+# URL plus cache_key, since the same key under a different project or location is a different
+# cache. Only hits are stored: a miss may become a hit as soon as the next request creates it.
+discovered_cache_names: Final = InMemoryCache(
+    max_size_in_memory=VERTEX_CACHE_DISCOVERY_MEMO_MAX_ENTRIES,
+    default_ttl=VERTEX_CACHE_DISCOVERY_MEMO_TTL_SECONDS,
+)
+
+
+def _memo_key(base_url: str, cache_key: str) -> str:
+    return f"{base_url}:{cache_key}"
 
 
 class ContextCachingEndpoints(VertexBase):
@@ -125,6 +143,11 @@ class ContextCachingEndpoints(VertexBase):
             model=model,
         )
 
+        memo_key: Final = _memo_key(base_url, cache_key)
+        memoized_name: Final = discovered_cache_names.get_cache(memo_key)
+        if memoized_name is not None:
+            return memoized_name
+
         page_token: str | None = None
 
         # Iterate through all pages
@@ -172,7 +195,10 @@ class ContextCachingEndpoints(VertexBase):
             for cached_item in all_cached_items["cachedContents"]:
                 display_name = cached_item.get("displayName")
                 if display_name is not None and display_name == cache_key:
-                    return cached_item.get("name")
+                    cached_content_name = cached_item.get("name")
+                    if cached_content_name is not None:
+                        discovered_cache_names.set_cache(memo_key, cached_content_name)
+                    return cached_content_name
 
             # Check if there are more pages
             page_token = all_cached_items.get("nextPageToken")
@@ -216,6 +242,11 @@ class ContextCachingEndpoints(VertexBase):
             vertex_auth_header=vertex_auth_header,
             model=model,
         )
+
+        memo_key: Final = _memo_key(base_url, cache_key)
+        memoized_name: Final = discovered_cache_names.get_cache(memo_key)
+        if memoized_name is not None:
+            return memoized_name
 
         page_token: str | None = None
 
@@ -264,7 +295,10 @@ class ContextCachingEndpoints(VertexBase):
             for cached_item in all_cached_items["cachedContents"]:
                 display_name = cached_item.get("displayName")
                 if display_name is not None and display_name == cache_key:
-                    return cached_item.get("name")
+                    cached_content_name = cached_item.get("name")
+                    if cached_content_name is not None:
+                        discovered_cache_names.set_cache(memo_key, cached_content_name)
+                    return cached_content_name
 
             # Check if there are more pages
             page_token = all_cached_items.get("nextPageToken")

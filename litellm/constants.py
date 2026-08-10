@@ -372,6 +372,11 @@ NON_LLM_CONNECTION_TIMEOUT: Final = int(
 MAX_EXCEPTION_MESSAGE_LENGTH: Final = int(os.getenv("MAX_EXCEPTION_MESSAGE_LENGTH", 2000))
 MAX_STRING_LENGTH_PROMPT_IN_DB: Final = int(os.getenv("MAX_STRING_LENGTH_PROMPT_IN_DB", 2048))
 BEDROCK_MAX_POLICY_SIZE: Final = int(os.getenv("BEDROCK_MAX_POLICY_SIZE", 75))
+# A resolved cachedContents name is memoized instead of re-discovered on every request. Kept well
+# under Google's 1 hour default cache TTL so an expired name is not served for long, and short
+# enough that a cache deleted out of band is picked up on the next window.
+VERTEX_CACHE_DISCOVERY_MEMO_TTL_SECONDS: Final = int(os.getenv("VERTEX_CACHE_DISCOVERY_MEMO_TTL_SECONDS", 300))
+VERTEX_CACHE_DISCOVERY_MEMO_MAX_ENTRIES: Final = int(os.getenv("VERTEX_CACHE_DISCOVERY_MEMO_MAX_ENTRIES", 500))
 # One entry per distinct AWS credential-argument set. Per-user cost attribution passes the attributed
 # identity as aws_session_name, so this bounds how many attributed identities keep a cached STS session.
 BEDROCK_IAM_CACHE_MAX_ENTRIES: Final = 1000
