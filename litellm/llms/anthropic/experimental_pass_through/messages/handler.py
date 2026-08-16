@@ -551,7 +551,11 @@ def anthropic_messages_handler(
             custom_llm_provider=custom_llm_provider,
             **kwargs,
         )
-        if _should_route_to_responses_api(custom_llm_provider):
+        # The Responses API has no stop-sequence parameter, so an OpenAI/Azure
+        # request carrying stop_sequences must stay on chat/completions, where
+        # it translates to `stop` (#37118). Everything else keeps the
+        # Responses API default.
+        if _should_route_to_responses_api(custom_llm_provider) and not stop_sequences:
             return LiteLLMMessagesToResponsesAPIHandler.anthropic_messages_handler(**_shared_kwargs)
 
         # The in-gateway context_management polyfill runs inside

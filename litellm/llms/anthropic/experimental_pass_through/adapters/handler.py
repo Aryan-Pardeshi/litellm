@@ -346,6 +346,11 @@ class LiteLLMMessagesToCompletionTransformationHandler:
         if custom_llm_provider != "openai":
             return
 
+        # The Responses API has no stop parameter; re-routing a request that
+        # carries a stop sequence would silently drop it again (#37118).
+        if completion_kwargs.get("stop"):
+            return
+
         if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
             return
 

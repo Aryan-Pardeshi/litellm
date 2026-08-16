@@ -960,3 +960,58 @@ def test_gate_passthrough_skipped_when_only_chat_completions_supported(monkeypat
     assert result == "translated"
     assert translation_calls["count"] == 1
     assert "config" not in captured
+
+
+def test_stop_sequences_routes_openai_model_to_chat_completions():
+    """
+    Regression test for #37118. OpenAI models default to the Responses API
+    path on /v1/messages, which has no stop-sequence parameter, so
+    `stop_sequences` was silently dropped. When the caller sends
+    stop_sequences, the request must route through chat/completions (which
+    translates it to `stop`) so the stop token is honored.
+    """
+    from litellm.llms.anthropic.experimental_pass_through.messages.handler import (
+        anthropic_messages_handler,
+    )
+
+    with (
+        patch("litellm.responses", return_value=MagicMock()) as mock_responses,
+        patch("litellm.completion", return_value=MagicMock()) as mock_completion,
+    ):
+        try:
+            anthropic_messages_handler(
+                max_tokens=100,
+                messages=[{"role": "user", "content": "Hello"}],
+                model="openai/gpt-4o-mini",
+                stop_sequences=["STOPPROBE"],
+                api_key="test-api-key",
+            )
+        except (ValueError, TypeError, AttributeError) as e:
+            print(f"Error: {e}")
+        mock_responses.assert_not_called()
+        mock_completion.assert_called_once()
+        assert mock_completion.call_args.kwargs["stop"] == ["STOPPROBE"]
+
+
+def test_thinking_with_stop_sequences_stays_on_chat_completions():
+    """
+    Companion to #37118: even when `thinking` is enabled (which normally
+    re-routes OpenAI requests to the Responses API via the `responses/`
+    model prefix), an explicit stop_sequences must win and keep the request
+    on chat/completions, otherwise the stop token would be dropped again.
+    """
+    from litellm.llms.anthropic.experimental_pass_through.adapters.handler import (
+        LiteLLMMessagesToCompletionTransformationHandler,
+    )
+
+    completion_kwargs = {
+        "model": "gpt-5.5",
+        "custom_llm_provider": "openai",
+        "reasoning_effort": "high",
+        "stop": ["STOPPROBE"],
+    }
+    LiteLLMMessagesToCompletionTransformationHandler._route_openai_thinking_to_responses_api_if_needed(
+        completion_kwargs,
+        thinking={"type": "enabled", "budget_tokens": 1024},
+    )
+    assert not completion_kwargs["model"].startswith("responses/")
